@@ -1,5 +1,5 @@
 name: CreativeGate
-version: '0.1'
+version: '0.1.2-thecivia'
 main: org.tamasoft.creativegate.CreativeGate
 api-version: 1.19
 prefix: "[CreativeGate]"

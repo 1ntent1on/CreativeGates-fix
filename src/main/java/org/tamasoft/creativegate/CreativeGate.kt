@@ -8,7 +8,6 @@ import org.tamasoft.creativegate.util.JsonFileUtil
 import java.io.File
 import java.nio.file.Files
 import java.util.logging.Logger
-import kotlin.concurrent.fixedRateTimer
 
 class CreativeGate : JavaPlugin(), Listener {
 
@@ -43,14 +42,15 @@ class CreativeGate : JavaPlugin(), Listener {
     override fun onEnable() {
         Bukkit.getPluginManager().registerEvents(this, this)
         server.pluginManager.registerEvents(EngineMain(), this)
-        fixedRateTimer("saveGates", false, 0L, 60 * 1000) {
-            GatesCollector.saveGates(gatesFile)
-        }
+        // Ukládání každou minutu přes Bukkit scheduler (hlavní vlákno bere snapshot, zápis je async).
+        // Úloha se při vypnutí pluginu sama zruší, na rozdíl od původního fixedRateTimeru.
+        server.scheduler.runTaskTimer(this, Runnable { GatesCollector.saveGates(gatesFile) }, 20L * 60, 20L * 60)
         logger.info { "Enabled" }
     }
 
     override fun onDisable() {
-        GatesCollector.saveGates(gatesFile)
+        // Při vypínání synchronně, jinak by JVM mohla skončit uprostřed zápisu.
+        GatesCollector.saveGates(gatesFile, async = false)
         logger.info { "Disabled" }
     }
 }

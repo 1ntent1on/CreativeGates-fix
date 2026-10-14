@@ -132,17 +132,25 @@ object GatesCollector {
         }
     }
 
-    fun saveGates(gatesFile: File) {
-        thread(start = true) {
-            JsonFileUtil.write(gatesFile, GateList(getUniqueGates()))
-            val creatorsFile = File(gatesFile.parentFile, "${gatesFile.nameWithoutExtension}_creators.json")
-            val creatorsMap = HashMap<String, String>()
-            gates.forEach { g ->
-                val k = gateKey(g)
-                creators[k]?.let { creatorsMap[k] = it.toString() }
-            }
-            JsonFileUtil.write(creatorsFile, CreatorsStore(creatorsMap))
+    /**
+     * Snapshot se bere na hlavním vlákně (kolekce nejsou thread-safe), zápis pak může běžet
+     * asynchronně. Soubor se zapisuje přes .tmp a přesun, takže pád uprostřed zápisu nepoškodí data.
+     */
+    fun saveGates(gatesFile: File, async: Boolean = true) {
+        val gateList = GateList(getUniqueGates())
+        val creatorsMap = HashMap<String, String>()
+        gates.forEach { g ->
+            val k = gateKey(g)
+            creators[k]?.let { creatorsMap[k] = it.toString() }
         }
+        val creatorsFile = File(gatesFile.parentFile, "${gatesFile.nameWithoutExtension}_creators.json")
+        val write = {
+            synchronized(this) {
+                JsonFileUtil.writeAtomic(gatesFile, gateList)
+                JsonFileUtil.writeAtomic(creatorsFile, CreatorsStore(creatorsMap))
+            }
+        }
+        if (async) thread(start = true, name = "CreativeGate-save") { write() } else write()
     }
 
     // creators JSON DTO

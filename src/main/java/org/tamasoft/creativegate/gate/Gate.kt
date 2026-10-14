@@ -110,7 +110,8 @@ class Gate() {
         }
     }
 
-    fun transport(player: Player) {
+    /** @return true, když byl hráč úspěšně přenesen */
+    fun transport(player: Player): Boolean {
         val gateChain = calcGatesInChainAfterThis()
         var message: String?
         for (gate in gateChain) {
@@ -118,7 +119,7 @@ class Gate() {
             try {
                 TeleportUtil.teleport(player, gate.exit)
                 fxKitUse()
-                return
+                return true
             } catch (e: TeleporterException) {
                 message = e.message
                 if (message != null) {
@@ -127,6 +128,13 @@ class Gate() {
             }
         }
         TxtUtil.sendTranslation(player, CreativeGate.configuration.gateNoDestinationMessage)
+        return false
+    }
+
+    /** Tvůrce brány: nejdřív z indexu tvůrců, pak z uloženého creatorId (starší brány ho mít nemusí). */
+    fun resolveCreator(): UUID? {
+        GatesCollector.getCreator(this)?.let { return it }
+        return if (this::creatorId.isInitialized) creatorId else null
     }
 
     fun calcGatesInChainAfterThis() : List<Gate?> {

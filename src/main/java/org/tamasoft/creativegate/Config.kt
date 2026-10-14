@@ -17,6 +17,17 @@ class Config {
     val materialMode = Material.BLAZE_ROD
     val voidMaterials: Set<Material> = EnumSet.of(Material.AIR)
 
+    // Příkazy z konzole po úspěšném vytvoření brány.
+    // Placeholdery: {player}, {uuid}, {network}, {gate}, {gates} (počet bran hráče po vytvoření)
+    val createCommands: List<String> = emptyList()
+
+    // Příkazy z konzole po úspěšném průchodu branou.
+    // Placeholdery: {player}, {uuid}, {network}, {gate}, {creator}, {creator_uuid}
+    val travelCommands: List<String> = emptyList()
+
+    // false = průchod vlastní branou (nebo branou bez známého tvůrce) příkazy nespouští
+    val travelCommandsOwnGates = false
+
 
     // Translations
     val maxGatesMessage : String = "You have reached the maximum number of gates you can create <h><limit><g>."

@@ -126,7 +126,26 @@ class EngineMain : Listener {
         if (player.isDead) return
 
         // ... then transport the player.
-        gate.transport(player)
+        if (gate.transport(player)) {
+            runTravelCommands(player, gate)
+        }
+    }
+
+    private fun runTravelCommands(player: org.bukkit.entity.Player, gate: Gate) {
+        val cfg = CreativeGate.configuration
+        if (cfg.travelCommands.isEmpty()) return
+        val creator = gate.resolveCreator()
+        val own = creator == null || creator == player.uniqueId
+        if (own && !cfg.travelCommandsOwnGates) return
+        val creatorName = creator?.let { Bukkit.getOfflinePlayer(it).name } ?: ""
+        CommandHook.run(cfg.travelCommands, mapOf(
+            "player" to player.name,
+            "uuid" to player.uniqueId.toString(),
+            "network" to gate.networkId,
+            "gate" to gate.id.toString(),
+            "creator" to creatorName,
+            "creator_uuid" to (creator?.toString() ?: "")
+        ))
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -259,6 +278,14 @@ class EngineMain : Listener {
 
             newGate.fill()
             newGate.fxKitCreate()
+
+            CommandHook.run(CreativeGate.configuration.createCommands, mapOf(
+                "player" to player.name,
+                "uuid" to player.uniqueId.toString(),
+                "network" to networkId,
+                "gate" to newGate.id.toString(),
+                "gates" to getByCreator(player.uniqueId).size.toString()
+            ))
 
             if (CreativeGate.configuration.removingCreateToolItem) {
                 decreaseOne(event)

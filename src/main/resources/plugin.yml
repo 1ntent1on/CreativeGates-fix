@@ -1,5 +1,5 @@
 name: CreativeGate
-version: '0.1.2-thecivia'
+version: '0.1.3-thecivia'
 main: org.tamasoft.creativegate.CreativeGate
 api-version: 1.19
 prefix: "[CreativeGate]"
@@ -36,4 +36,7 @@ permissions:
     default: op
   CreativeGates.10:
     description: Allows the player to use the gates
+    default: op
+  creativegates.network.bypass:
+    description: Add gates to networks owned by other players (only checked when networkOwnership is enabled)
     default: op

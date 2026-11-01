@@ -21,6 +21,8 @@ import org.tamasoft.creativegate.util.VoidUtil
 import java.util.*
 import kotlin.collections.ArrayList
 
+private val NIL_UUID = UUID(0L, 0L)
+
 @JsonIdentityInfo(generator = ObjectIdGenerators.PropertyGenerator::class, property = "id")
 class Gate() {
 
@@ -58,9 +60,22 @@ class Gate() {
     }
 
 
+    // Mutations flag the registry so the periodic save only writes when something changed.
     var restricted = false
+        set(value) {
+            field = value
+            GatesCollector.markDirty()
+        }
     var enterEnabled = true
+        set(value) {
+            field = value
+            GatesCollector.markDirty()
+        }
     var exitEnabled = true
+        set(value) {
+            field = value
+            GatesCollector.markDirty()
+        }
     var frameCoords: Set<BlockLocation> = HashSet()
         get() {
             return Collections.unmodifiableSet(field)
@@ -78,8 +93,19 @@ class Gate() {
             id = calcId()
         }
 
+    /** creatorId is lateinit and missing in old gates.json files; never touch it directly outside this class. */
+    fun creatorOrNull(): UUID? {
+        if (!::creatorId.isInitialized) return null
+        return if (creatorId == NIL_UUID) null else creatorId
+    }
+
+    /** Creator from the registry (which also knows creators restored from the creators file), else creatorId. */
+    fun resolveCreator(): UUID? {
+        return GatesCollector.getCreator(this) ?: creatorOrNull()
+    }
+
     fun isCreator(sender: Player): Boolean {
-        return sender.identity().uuid() == creatorId
+        return sender.uniqueId == resolveCreator()
     }
 
     fun destroy() {
@@ -110,49 +136,75 @@ class Gate() {
         }
     }
 
-    /** @return true, když byl hráč úspěšně přenesen */
-    fun transport(player: Player): Boolean {
-        val gateChain = calcGatesInChainAfterThis()
-        var message: String?
-        for (gate in gateChain) {
-            if (!gate!!.exitEnabled) continue
-            try {
+    /**
+     * Sends the player to the first usable exit in the network chain. The teleport is asynchronous (the destination
+     * chunk may still have to load), so the result is reported through [onSuccess], which runs on the main thread
+     * only after the player has really arrived.
+     */
+    fun transport(player: Player, onSuccess: () -> Unit = {}) {
+        if (!TeleportUtil.begin(player)) return // a previous teleport of this player is still in flight
+        tryExits(player, calcGatesInChainAfterThis().iterator(), onSuccess)
+    }
+
+    private fun tryExits(player: Player, exits: Iterator<Gate>, onSuccess: () -> Unit) {
+        while (exits.hasNext()) {
+            val gate = exits.next()
+            if (!gate.exitEnabled) continue
+
+            val future = try {
                 TeleportUtil.teleport(player, gate.exit)
-                fxKitUse()
-                return true
             } catch (e: TeleporterException) {
-                message = e.message
-                if (message != null) {
-                    player.sendMessage(message)
+                e.message?.let { player.sendMessage(it) }
+                continue
+            }
+
+            future.whenComplete { arrived, _ ->
+                runSync {
+                    if (arrived == true) {
+                        TeleportUtil.end(player)
+                        fxKitUse()
+                        onSuccess()
+                    } else {
+                        // Cancelled by another plugin (combat tag, claim rules, ...): try the next exit.
+                        tryExits(player, exits, onSuccess)
+                    }
                 }
             }
+            return
         }
+        TeleportUtil.end(player)
         TxtUtil.sendTranslation(player, CreativeGate.configuration.gateNoDestinationMessage)
-        return false
     }
 
-    /** Tvůrce brány: nejdřív z indexu tvůrců, pak z uloženého creatorId (starší brány ho mít nemusí). */
-    fun resolveCreator(): UUID? {
-        GatesCollector.getCreator(this)?.let { return it }
-        return if (this::creatorId.isInitialized) creatorId else null
+    private fun runSync(task: () -> Unit) {
+        val plugin = CreativeGate.instance
+        if (Bukkit.isPrimaryThread() || plugin == null || !plugin.isEnabled) {
+            task()
+        } else {
+            Bukkit.getScheduler().runTask(plugin, Runnable { task() })
+        }
     }
 
-    fun calcGatesInChainAfterThis() : List<Gate?> {
+    fun calcGatesInChainAfterThis(): List<Gate> {
         val rawChain = GatesCollector.getByNetworkId(networkId)
         val myIndex = rawChain.indexOf(this)
-        if (myIndex >= 0) {
-            val ret: MutableList<Gate?> = ArrayList()
+        // A gate that was removed in the same tick has no chain; that must not throw out of an event handler.
+        if (myIndex < 0) return emptyList()
 
-            // Add what is after me
-            ret.addAll(rawChain.subList(myIndex + 1, rawChain.size))
+        val ret: MutableList<Gate> = ArrayList()
 
-            // Add what is before me
-            ret.addAll(rawChain.subList(0, myIndex))
+        // Add what is after me
+        ret.addAll(rawChain.subList(myIndex + 1, rawChain.size))
 
-            return ret
-        } else {
-            throw IllegalStateException("The gates chain in gate $id does not contain the gate itself")
-        }
+        // Add what is before me
+        ret.addAll(rawChain.subList(0, myIndex))
+
+        return ret
+    }
+
+    /** Old gates.json files have no creatorId; give them a placeholder so serialising never throws. */
+    fun ensureCreatorId() {
+        if (!::creatorId.isInitialized) creatorId = NIL_UUID
     }
 
     // These blocks are sorted since the coords are sorted

@@ -7,6 +7,7 @@ import org.bukkit.inventory.Inventory
 import org.bukkit.inventory.ItemStack
 import org.bukkit.inventory.PlayerInventory
 import org.bukkit.scheduler.BukkitRunnable
+import org.tamasoft.creativegate.CreativeGate
 
 object InventoryUtil {
     private const val SIZE_PLAYER_STORAGE = 36
@@ -64,10 +65,11 @@ object InventoryUtil {
     }
 
     fun updateSoon(player: Player) {
+        val plugin = CreativeGate.instance ?: return
         object : BukkitRunnable() {
             override fun run() {
                 player.updateInventory()
             }
-        }.run()
+        }.runTask(plugin)
     }
 }

@@ -3,36 +3,41 @@ package org.tamasoft.creativegate
 import org.bukkit.Bukkit
 import java.util.logging.Level
 
-/** Spouští příkazy z configu za konzoli (pro napojení na Badges a podobně). */
+/**
+ * Runs the configurable console commands (createCommands / travelCommands).
+ * Placeholder values are sanitised so a player or network name can never inject extra command arguments.
+ */
 object CommandHook {
 
-    /**
-     * Hodnoty od hráče (název sítě = jméno itemu z kovadliny) se nesmí dostat do příkazu
-     * s mezerami nebo speciálními znaky, jinak by si hráč mohl do příkazu z konzole
-     * připsat vlastní argumenty. Povolená jsou jen písmena, číslice, _ a -.
-     */
-    private fun sanitize(value: String): String =
-        value.replace(Regex("[^\\p{L}\\p{N}_-]"), "_").take(64)
+    private val unsafeChars = Regex("[^\\p{L}\\p{N}_-]")
+
+    private fun sanitize(value: String): String = unsafeChars.replace(value, "_").take(64)
 
     fun run(commands: List<String>, placeholders: Map<String, String>) {
         if (commands.isEmpty()) return
+
         val task = Runnable {
             for (raw in commands) {
-                var cmd = raw
+                var command = raw
                 for ((key, value) in placeholders) {
-                    cmd = cmd.replace("{$key}", sanitize(value))
+                    command = command.replace("{$key}", sanitize(value))
                 }
-                if (cmd.startsWith("/")) cmd = cmd.substring(1)
-                if (cmd.isBlank()) continue
+                if (command.startsWith("/")) command = command.substring(1)
+                if (command.isBlank()) continue
+
                 try {
-                    Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd)
+                    Bukkit.dispatchCommand(Bukkit.getConsoleSender(), command)
                 } catch (e: Exception) {
-                    CreativeGate.instance?.logger?.log(Level.WARNING, "Prikaz '$cmd' selhal", e)
+                    CreativeGate.instance?.logger?.log(Level.WARNING, "Prikaz '$command' selhal", e)
                 }
             }
         }
+
         val plugin = CreativeGate.instance
-        if (Bukkit.isPrimaryThread() || plugin == null) task.run()
-        else Bukkit.getScheduler().runTask(plugin, task)
+        if (Bukkit.isPrimaryThread() || plugin == null) {
+            task.run()
+        } else {
+            Bukkit.getScheduler().runTask(plugin, task)
+        }
     }
 }

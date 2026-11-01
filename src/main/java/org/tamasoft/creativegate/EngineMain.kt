@@ -8,6 +8,7 @@ import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.block.Block
 import org.bukkit.entity.EntityType
+import org.bukkit.entity.Player
 import org.bukkit.event.Cancellable
 import org.bukkit.event.EventHandler
 import org.bukkit.event.EventPriority
@@ -18,16 +19,15 @@ import org.bukkit.event.entity.EntityChangeBlockEvent
 import org.bukkit.event.entity.EntityExplodeEvent
 import org.bukkit.event.entity.EntityPortalEvent
 import org.bukkit.event.player.*
+import org.bukkit.inventory.EquipmentSlot
 import org.bukkit.inventory.ItemStack
 import org.tamasoft.creativegate.gate.Gate
 import org.tamasoft.creativegate.gate.GatesCollector
-import org.tamasoft.creativegate.gate.GatesCollector.getByCreator
 import org.tamasoft.creativegate.teleport.BlockLocation
 import org.tamasoft.creativegate.teleport.Destination
 import org.tamasoft.creativegate.teleport.Heading
 import org.tamasoft.creativegate.util.*
 import java.util.*
-import java.util.stream.Collectors
 
 
 class EngineMain : Listener {
@@ -47,6 +47,8 @@ class EngineMain : Listener {
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun stabilizePortalContent(event: BlockFromToEvent) {
+        // Fires for every liquid flow on the server: bail out before doing any lookups when this world has no gates.
+        if (!GatesCollector.hasPortalsIn(event.block.world.name)) return
         if (GatesCollector.Portals[event.block] == null && GatesCollector.Portals[event.toBlock] == null) return
         event.isCancelled = true
     }
@@ -68,6 +70,8 @@ class EngineMain : Listener {
 
     @EventHandler(priority = EventPriority.NORMAL)
     fun disableVanillaGates(event: PlayerPortalEvent) {
+        // End portals and end gateways are not ours to cancel.
+        if (event.cause != PlayerTeleportEvent.TeleportCause.NETHER_PORTAL) return
         disableVanillaGates(event.from, event)
     }
 
@@ -125,27 +129,30 @@ class EngineMain : Listener {
         // ... and the player is alive ...
         if (player.isDead) return
 
-        // ... then transport the player.
-        if (gate.transport(player)) {
-            runTravelCommands(player, gate)
-        }
+        // ... then transport the player. Travel commands run only once the player has really arrived.
+        gate.transport(player) { runTravelCommands(player, gate) }
     }
 
-    private fun runTravelCommands(player: org.bukkit.entity.Player, gate: Gate) {
-        val cfg = CreativeGate.configuration
-        if (cfg.travelCommands.isEmpty()) return
+    private fun runTravelCommands(player: Player, gate: Gate) {
+        val config = CreativeGate.configuration
+        if (config.travelCommands.isEmpty()) return
+
         val creator = gate.resolveCreator()
-        val own = creator == null || creator == player.uniqueId
-        if (own && !cfg.travelCommandsOwnGates) return
+        val ownGate = creator != null && creator == player.uniqueId
+        if (ownGate && !config.travelCommandsOwnGates) return
+
         val creatorName = creator?.let { Bukkit.getOfflinePlayer(it).name } ?: ""
-        CommandHook.run(cfg.travelCommands, mapOf(
-            "player" to player.name,
-            "uuid" to player.uniqueId.toString(),
-            "network" to gate.networkId,
-            "gate" to gate.id.toString(),
-            "creator" to creatorName,
-            "creator_uuid" to (creator?.toString() ?: "")
-        ))
+        CommandHook.run(
+            config.travelCommands,
+            mapOf(
+                "player" to player.name,
+                "uuid" to player.uniqueId.toString(),
+                "network" to gate.networkId,
+                "gate" to gate.id.toString(),
+                "creator" to creatorName,
+                "creator_uuid" to (creator?.toString() ?: "")
+            )
+        )
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -160,6 +167,14 @@ class EngineMain : Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun destroyGate(event: EntityExplodeEvent) {
+        for (block in event.blockList()) {
+            destroyGate(block)
+        }
+    }
+
+    // Beds, respawn anchors and similar. Before this, those explosions only destroyed a gate on its next use.
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun destroyGate(event: BlockExplodeEvent) {
         for (block in event.blockList()) {
             destroyGate(block)
         }
@@ -201,187 +216,214 @@ class EngineMain : Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun tools(event: PlayerInteractEvent) {
+        val config = CreativeGate.configuration
 
         val player = event.player
         val clickedBlock = event.clickedBlock ?: return
         val currentItem = event.item ?: return
         val material = currentItem.type
 
-        if (material != CreativeGate.configuration.materialInspect
-            && material != CreativeGate.configuration.materialMode
-            && material != CreativeGate.configuration.materialSecret
-            && material != CreativeGate.configuration.materialCreate
-        ) {
+        if (!isToolMaterial(material)) return
+
+        // The event fires once per hand. When a tool is also held in the main hand, the main-hand pass handles it,
+        // otherwise e.g. a mode tool in both hands would toggle twice and cancel itself out.
+        val hand = event.hand ?: return
+        if (hand == EquipmentSlot.OFF_HAND && isToolMaterial(player.inventory.itemInMainHand.type)) return
+
+        if (material == config.materialCreate && event.action == Action.RIGHT_CLICK_BLOCK) {
+            createGate(event, player, clickedBlock, currentItem, material)
             return
         }
 
-        val gates = getByCreator(player.identity().uuid())
-        if (gates.size >= PermUtil.highestLevel(player)) {
-            val reqLevel = PermUtil.highestLevel(player)
-            player.sendMessage(TxtUtil.parse("<b>${CreativeGate.configuration.maxGatesMessage} <h>$reqLevel<g>."))
-            return
-        }
-
-        val currentGates: MutableSet<Gate> = GatesCollector.Frames[clickedBlock]
+        val currentGates: MutableSet<Gate> = LinkedHashSet(GatesCollector.Frames[clickedBlock])
         if (currentGates.isEmpty()) {
-            Optional.ofNullable(GatesCollector.Portals[clickedBlock]).ifPresent(currentGates::add)
+            GatesCollector.Portals[clickedBlock]?.let { currentGates.add(it) }
         }
 
-        if (material == CreativeGate.configuration.materialCreate && event.action == Action.RIGHT_CLICK_BLOCK) {
-            val currentItemMeta = currentItem.itemMeta
-            if (!currentItemMeta.hasDisplayName()) {
+        if (currentGates.isEmpty()) {
+            if (isGateNearby(clickedBlock)) {
                 val reqMaterial = TxtUtil.getMaterialName(material)
-
-                val tagResolver: Array<TagResolver> = arrayOf<TagResolver>(Placeholder.unparsed("reqMaterial", reqMaterial))
-                TxtUtil.sendTranslation(player, CreativeGate.configuration.mustNameItemMessage, tagResolver)
-                return
+                val blockMaterial = TxtUtil.getMaterialName(clickedBlock.type)
+                val tagResolver = arrayOf<TagResolver>(
+                    Placeholder.unparsed("reqMaterial", reqMaterial),
+                    Placeholder.unparsed("blockMaterial", blockMaterial)
+                )
+                TxtUtil.sendTranslation(player, config.noGateMessage, tagResolver)
             }
+            return
+        }
 
-            val networkId = PlainTextComponentSerializer.plainText().serialize(currentItemMeta.displayName()!!)
+        if (!config.usingWater) {
+            currentGates.forEach(Gate::fill)
+        }
 
-            val gateFloodInfo: FloodUtil.FloodInfo? = FloodUtil.getGateFloodInfo(clickedBlock, event.blockFace)
-            if (gateFloodInfo == null) {
-                val tagResolver = arrayOf<TagResolver>(Placeholder.unparsed("material", TxtUtil.getMaterialName(material)))
-                TxtUtil.sendTranslation(player, CreativeGate.configuration.noFrameOrTooBigMessage, tagResolver)
-                return
-            }
-            val gateOrientation = gateFloodInfo.gateOrientation
-            val frameBlocks = gateFloodInfo.frameBlocks
-            val portalBlocks = gateFloodInfo.portalBlocks
+        val reqMaterial = TxtUtil.getMaterialName(material)
+        val blockMaterial = TxtUtil.getMaterialName(clickedBlock.type)
+        val tagResolver = arrayOf<TagResolver>(
+            Placeholder.unparsed("reqmaterial", reqMaterial),
+            Placeholder.unparsed("blockmaterial", blockMaterial)
+        )
+        TxtUtil.sendTranslation(player, config.gateUsingMessage, tagResolver)
 
-            val materialCounts: Map<Material, Long> = MaterialCountUtil.count(frameBlocks)
-            if (!MaterialCountUtil.has(materialCounts, CreativeGate.configuration.blocksRequired)) {
-                val reqBlocks = MaterialCountUtil.desc(CreativeGate.configuration.blocksRequired)
-                val tagResolver = arrayOf<TagResolver>(Placeholder.unparsed("blocks", reqBlocks))
-                TxtUtil.sendTranslation(player, CreativeGate.configuration.frameMustContainMessage, tagResolver)
-                return
-            }
-
-            val world = player.world.name
-            val playerLocation = BlockLocation.fromLocation(player.location)
-            val gateLocation = BlockLocation.fromBlock(portalBlocks.iterator().next())
-            val heading = Heading(0f, gateOrientation.getExitYaw(playerLocation, gateLocation))
-            val exit = Destination(world, playerLocation, heading)
-
-            val frameCoords = frameBlocks.stream()
-                .map(BlockLocation::fromBlock)
-                .collect(Collectors.toSet())
-            val portalCoords = portalBlocks.stream()
-                .map(BlockLocation::fromBlock)
-                .collect(Collectors.toSet())
-
-            val newGate = Gate(networkId, exit, frameCoords, portalCoords, player.identity().uuid())
-            GatesCollector.register(newGate)
-
-            // also save creator in in-memory index for JSON persistence
-            GatesCollector.setCreator(newGate, player.identity().uuid())
-
-            newGate.fill()
-            newGate.fxKitCreate()
-
-            CommandHook.run(CreativeGate.configuration.createCommands, mapOf(
-                "player" to player.name,
-                "uuid" to player.uniqueId.toString(),
-                "network" to networkId,
-                "gate" to newGate.id.toString(),
-                "gates" to getByCreator(player.uniqueId).size.toString()
-            ))
-
-            if (CreativeGate.configuration.removingCreateToolItem) {
-                decreaseOne(event)
-                val reqMaterial = TxtUtil.getMaterialName(material)
-            } else if (CreativeGate.configuration.removingCreateToolName) {
-                decreaseOne(event)
-
-                val newItemUnnamed = ItemStack(currentItem)
-                val newItemUnnamedMeta = newItemUnnamed.itemMeta
-                newItemUnnamedMeta.displayName(null)
-                newItemUnnamed.itemMeta = newItemUnnamedMeta
-                newItemUnnamed.amount = 1
-                player.inventory.addItem(newItemUnnamed)
-
-                InventoryUtil.updateSoon(player)
-
-                val reqMaterial = TxtUtil.getMaterialName(material)
-            }
-        } else {
-            if (currentGates.isEmpty()) {
-                if (isGateNearby(clickedBlock)) {
-                    val reqMaterial = TxtUtil.getMaterialName(material)
-                    val blockMaterial = TxtUtil.getMaterialName(clickedBlock.type)
-                    val tagResolver = arrayOf<TagResolver>(
-                        Placeholder.unparsed("reqMaterial", reqMaterial),
-                        Placeholder.unparsed("blockMaterial", blockMaterial)
-                    )
-                    TxtUtil.sendTranslation(player, CreativeGate.configuration.noGateMessage, tagResolver)
-                    return
+        for (currentGate in currentGates) {
+            if (currentGate.restricted) {
+                if (currentGate.isCreator(player)) {
+                    TxtUtil.sendTranslation(player, config.gateRestrictedCreatorMessage)
                 } else {
+                    TxtUtil.sendTranslation(player, config.gateRestrictedMessage)
                     return
                 }
             }
-
-            if (!CreativeGate.configuration.usingWater) {
-                currentGates.forEach(Gate::fill)
-            }
-
-            val reqMaterial = TxtUtil.getMaterialName(material)
-            val blockMaterial = TxtUtil.getMaterialName(clickedBlock.type)
-            val tagResolver = arrayOf<TagResolver>(
-                Placeholder.unparsed("reqmaterial", reqMaterial),
-                Placeholder.unparsed("blockmaterial", blockMaterial)
-            )
-            TxtUtil.sendTranslation(player, CreativeGate.configuration.gateUsingMessage, tagResolver)
-
-            for (currentGate in currentGates) {
-                if (currentGate.restricted) {
-                    if (currentGate.isCreator(player)) {
-                        TxtUtil.sendTranslation(player, CreativeGate.configuration.gateRestrictedCreatorMessage)
-                    } else {
-                        TxtUtil.sendTranslation(player, CreativeGate.configuration.gateRestrictedMessage)
-                        return
-                    }
+            if (material == config.materialInspect) {
+                TxtUtil.sendTranslation(player, config.gateInspect1Message)
+                var resolver = arrayOf<TagResolver>(Placeholder.unparsed("networkid", currentGate.networkId))
+                TxtUtil.sendTranslation(player, config.gateInspect2Message, resolver)
+                resolver = arrayOf<TagResolver>(Placeholder.unparsed("chainsize", (currentGate.calcGatesInChainAfterThis().size + 1).toString()))
+                TxtUtil.sendTranslation(player, config.gateInspect3Message, resolver)
+                currentGate.resolveCreator()?.let {
+                    resolver = arrayOf<TagResolver>(Placeholder.unparsed("creatorname", Bukkit.getOfflinePlayer(it).name ?: "unknown"))
+                    TxtUtil.sendTranslation(player, config.gateInspect4Message, resolver)
                 }
-                if (material == CreativeGate.configuration.materialInspect) {
-                    TxtUtil.sendTranslation(player, CreativeGate.configuration.gateInspect1Message)
-                    var tagResolver = arrayOf<TagResolver>(Placeholder.unparsed("networkid", currentGate.networkId))
-                    TxtUtil.sendTranslation(player, CreativeGate.configuration.gateInspect2Message, tagResolver)
-                    tagResolver = arrayOf<TagResolver>(Placeholder.unparsed("chainsize", (currentGate.calcGatesInChainAfterThis().size + 1).toString()))
-                    TxtUtil.sendTranslation(player, CreativeGate.configuration.gateInspect3Message, tagResolver)
-                    GatesCollector.getCreator(currentGate)?.let {
-                        tagResolver = arrayOf<TagResolver>(Placeholder.unparsed("creatorname", Bukkit.getOfflinePlayer(it).name ?: "unknown"))
-                        TxtUtil.sendTranslation(player, CreativeGate.configuration.gateInspect4Message, tagResolver)
-                    }
-                } else if (material == CreativeGate.configuration.materialSecret) {
-                    val creator = currentGate.isCreator(player)
-                    if (creator) {
-                        val secret: Boolean = !currentGate.restricted
-                        currentGate.restricted = secret
-                        if (secret)
-                            TxtUtil.sendTranslation(player, CreativeGate.configuration.onlyYouCanReadMessage)
-                        else
-                            TxtUtil.sendTranslation(player, CreativeGate.configuration.everyoneCanReadMessage)
-                    } else {
-                        TxtUtil.sendTranslation(player, CreativeGate.configuration.onlyOwnerCanChangeMessage)
-                    }
-                } else if (material == CreativeGate.configuration.materialMode) {
-                    currentGate.toggleMode()
-                    val enter: String =
-                        if (currentGate.enterEnabled) CreativeGate.configuration.enterEnabledMessage else CreativeGate.configuration.enterDisabledMessage
-                    val exit: String =
-                        if (currentGate.exitEnabled) CreativeGate.configuration.exitEnabledMessage else CreativeGate.configuration.exitDisabledMessage
-
-                    var tagResolver = arrayOf<TagResolver>(
-                        Placeholder.unparsed("enter", enter),
-                        Placeholder.unparsed("exit", exit)
-                    )
-                    TxtUtil.sendTranslation(player, CreativeGate.configuration.gateNowHasMessage, tagResolver)
+            } else if (material == config.materialSecret) {
+                if (currentGate.isCreator(player)) {
+                    val secret: Boolean = !currentGate.restricted
+                    currentGate.restricted = secret
+                    if (secret)
+                        TxtUtil.sendTranslation(player, config.onlyYouCanReadMessage)
+                    else
+                        TxtUtil.sendTranslation(player, config.everyoneCanReadMessage)
+                } else {
+                    TxtUtil.sendTranslation(player, config.onlyOwnerCanChangeMessage)
                 }
+            } else if (material == config.materialMode) {
+                currentGate.toggleMode()
+                val enter: String =
+                    if (currentGate.enterEnabled) config.enterEnabledMessage else config.enterDisabledMessage
+                val exit: String =
+                    if (currentGate.exitEnabled) config.exitEnabledMessage else config.exitDisabledMessage
+
+                val resolver = arrayOf<TagResolver>(
+                    Placeholder.unparsed("enter", enter),
+                    Placeholder.unparsed("exit", exit)
+                )
+                TxtUtil.sendTranslation(player, config.gateNowHasMessage, resolver)
             }
         }
     }
 
+    private fun createGate(event: PlayerInteractEvent, player: Player, clickedBlock: Block, currentItem: ItemStack, material: Material) {
+        val config = CreativeGate.configuration
+
+        // The gate limit only applies to creating gates. It used to run before every tool, so a player at the limit
+        // could not even inspect or toggle the gates they already had.
+        val limit = PermUtil.highestLevel(player)
+        if (GatesCollector.getByCreator(player.uniqueId).size >= limit) {
+            val resolver = arrayOf<TagResolver>(Placeholder.unparsed("limit", limit.toString()))
+            TxtUtil.sendTranslation(player, config.maxGatesMessage, resolver)
+            return
+        }
+
+        val currentItemMeta = currentItem.itemMeta
+        if (currentItemMeta == null || !currentItemMeta.hasDisplayName()) {
+            val reqMaterial = TxtUtil.getMaterialName(material)
+            val tagResolver = arrayOf<TagResolver>(
+                Placeholder.unparsed("reqMaterial", reqMaterial),
+                Placeholder.unparsed("material", reqMaterial)
+            )
+            TxtUtil.sendTranslation(player, config.mustNameItemMessage, tagResolver)
+            return
+        }
+
+        val networkId = PlainTextComponentSerializer.plainText().serialize(currentItemMeta.displayName()!!)
+
+        // Anyone naming an item like an existing network used to join that network and become a destination of its
+        // gates. With networkOwnership enabled only the owner (creator of the oldest gate) can extend a network.
+        if (config.networkOwnership && !player.hasPermission("creativegates.network.bypass")) {
+            val owner = GatesCollector.getNetworkOwner(networkId)
+            if (owner != null && owner != player.uniqueId) {
+                TxtUtil.sendTranslation(player, config.networkTakenMessage)
+                return
+            }
+        }
+
+        val gateFloodInfo: FloodUtil.FloodInfo? = FloodUtil.getGateFloodInfo(clickedBlock, event.blockFace)
+        if (gateFloodInfo == null) {
+            val tagResolver = arrayOf<TagResolver>(Placeholder.unparsed("material", TxtUtil.getMaterialName(material)))
+            TxtUtil.sendTranslation(player, config.noFrameOrTooBigMessage, tagResolver)
+            return
+        }
+        val gateOrientation = gateFloodInfo.gateOrientation
+        val frameBlocks = gateFloodInfo.frameBlocks
+        val portalBlocks = gateFloodInfo.portalBlocks
+
+        val materialCounts: Map<Material, Long> = MaterialCountUtil.count(frameBlocks)
+        if (!MaterialCountUtil.has(materialCounts, config.blocksRequired)) {
+            val reqBlocks = MaterialCountUtil.desc(config.blocksRequired)
+            val tagResolver = arrayOf<TagResolver>(Placeholder.unparsed("blocks", reqBlocks))
+            TxtUtil.sendTranslation(player, config.frameMustContainMessage, tagResolver)
+            return
+        }
+
+        val world = player.world.name
+        val playerLocation = BlockLocation.fromLocation(player.location)
+        val gateLocation = BlockLocation.fromBlock(portalBlocks.iterator().next())
+        val heading = Heading(0f, gateOrientation.getExitYaw(playerLocation, gateLocation))
+        val exit = Destination(world, playerLocation, heading)
+
+        val frameCoords = frameBlocks.map { BlockLocation.fromBlock(it) }.toSet()
+        val portalCoords = portalBlocks.map { BlockLocation.fromBlock(it) }.toSet()
+
+        val newGate = Gate(networkId, exit, frameCoords, portalCoords, player.uniqueId)
+        GatesCollector.register(newGate)
+
+        // also save creator in the creators index used for limits and JSON persistence
+        GatesCollector.setCreator(newGate, player.uniqueId)
+
+        newGate.fill()
+        newGate.fxKitCreate()
+
+        CommandHook.run(
+            config.createCommands,
+            mapOf(
+                "player" to player.name,
+                "uuid" to player.uniqueId.toString(),
+                "network" to networkId,
+                "gate" to newGate.id.toString(),
+                "gates" to GatesCollector.getByCreator(player.uniqueId).size.toString()
+            )
+        )
+
+        if (config.removingCreateToolItem) {
+            decreaseOne(event)
+        } else if (config.removingCreateToolName) {
+            decreaseOne(event)
+
+            val newItemUnnamed = ItemStack(currentItem)
+            val newItemUnnamedMeta = newItemUnnamed.itemMeta
+            newItemUnnamedMeta.displayName(null)
+            newItemUnnamed.itemMeta = newItemUnnamedMeta
+            newItemUnnamed.amount = 1
+
+            // A full inventory used to silently delete the returned item.
+            player.inventory.addItem(newItemUnnamed).values.forEach {
+                player.world.dropItemNaturally(player.location, it)
+            }
+
+            InventoryUtil.updateSoon(player)
+        }
+    }
+
     companion object {
+        private fun isToolMaterial(material: Material): Boolean {
+            val config = CreativeGate.configuration
+            return material == config.materialInspect
+                    || material == config.materialMode
+                    || material == config.materialSecret
+                    || material == config.materialCreate
+        }
+
         fun isGateNearby(block: Block): Boolean {
+            if (!GatesCollector.hasPortalsIn(block.world.name)) return false
             val radius = 3
             for (dx in -radius..radius) {
                 for (dy in -radius..radius) {
@@ -421,34 +463,14 @@ class EngineMain : Listener {
         }
     }
 
-    // Note we cannot use event.getHand() because it is too new
+    // Removes one item from the hand the event was fired for. The old version compared item stacks to guess which
+    // slot to change, and threw after the gate was already created when it could not find it.
     private fun decreaseOne(event: PlayerInteractEvent) {
-        val currentItem = event.item
-        val player = event.player
-        val newItem = ItemStack(currentItem!!)
-        newItem.amount = newItem.amount - 1
-        val weapon = currentItem == InventoryUtil.getWeapon(player)
-        val shield = currentItem == InventoryUtil.getShield(player)
-        if (weapon) InventoryUtil.setWeapon(player, newItem)
-        else if (shield) InventoryUtil.setShield(player, newItem)
-        else {
-            // This is not to be expected, but it is an attempt future-proofing, in case the API changes.
-            var success = false
-            val it = player.inventory.iterator()
-            while (it.hasNext()) {
-                val itemStack = it.next()
-
-                // If the item stack is equal to the old item stack, then they are probably the same.
-                if (currentItem != itemStack) {
-                    continue
-                }
-
-                // So just set
-                it.set(newItem)
-                success = true
-                break
-            }
-            if (!success) throw RuntimeException()
-        }
+        val item = event.item ?: return
+        val inventory = event.player.inventory
+        val remaining = item.amount - 1
+        val replacement = if (remaining <= 0) null else ItemStack(item).also { it.amount = remaining }
+        if (event.hand == EquipmentSlot.OFF_HAND) inventory.setItemInOffHand(replacement)
+        else inventory.setItemInMainHand(replacement)
     }
 }

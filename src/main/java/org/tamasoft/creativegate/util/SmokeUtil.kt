@@ -1,34 +1,26 @@
 package org.tamasoft.creativegate.util
 
-import org.apache.commons.lang3.mutable.MutableBoolean
 import org.bukkit.Location
-
-// http://mc.kev009.com/Protocol
-// -----------------------------
-// Smoke Directions 
-// -----------------------------
-// Direction 	ID	Direction
-//				0	South - East
-//				1	South
-//				2	South - West
-//				3	East
-//				4	(Up or middle ?)
-//				5	West
-//				6	North - East
-//				7	North
-//				8	North - West
-//-----------------------------
+import org.bukkit.Particle
+import org.bukkit.Sound
 
 object SmokeUtil {
 
-    val fakeExplosion: MutableBoolean = MutableBoolean(false)
-
+    /**
+     * Visual/audio "explosion" effect for a destroyed gate.
+     *
+     * This used to call World#createExplosion, which is a real explosion: it damaged and knocked back nearby
+     * players (including whoever just broke the frame) and destroyed dropped items. Particles and a sound
+     * give the same look without touching any entity.
+     */
     @JvmOverloads
-    fun fakeExplosion(location: Location, power: Float = 4f) {
-        synchronized(fakeExplosion) {
-            fakeExplosion.setValue(true)
-            location.world.createExplosion(location.x, location.y, location.z, power, false, false)
-            fakeExplosion.setValue(false)
+    fun fakeExplosion(location: Location, @Suppress("UNUSED_PARAMETER") power: Float = 4f) {
+        val world = location.world ?: return
+        try {
+            world.spawnParticle(Particle.EXPLOSION, location, 1)
+            world.playSound(location, Sound.ENTITY_GENERIC_EXPLODE, 1f, 1f)
+        } catch (_: Throwable) {
+            // Constant renamed/removed in a newer API: skip the effect rather than break gate removal.
         }
     }
 }

@@ -5,6 +5,7 @@ import org.bukkit.event.Listener
 import org.bukkit.plugin.java.JavaPlugin
 import org.tamasoft.creativegate.gate.GatesCollector
 import org.tamasoft.creativegate.util.JsonFileUtil
+import org.tamasoft.creativegate.util.TeleportUtil
 import java.io.File
 import java.nio.file.Files
 import java.util.logging.Logger
@@ -42,15 +43,16 @@ class CreativeGate : JavaPlugin(), Listener {
     override fun onEnable() {
         Bukkit.getPluginManager().registerEvents(this, this)
         server.pluginManager.registerEvents(EngineMain(), this)
-        // Ukládání každou minutu přes Bukkit scheduler (hlavní vlákno bere snapshot, zápis je async).
-        // Úloha se při vypnutí pluginu sama zruší, na rozdíl od původního fixedRateTimeru.
-        server.scheduler.runTaskTimer(this, Runnable { GatesCollector.saveGates(gatesFile) }, 20L * 60, 20L * 60)
+        // Bukkit scheduler (cancelled automatically on disable) instead of a never-cancelled java.util.Timer.
+        // Snapshot on the main thread, write on an async task, and only when something changed.
+        server.scheduler.runTaskTimer(this, Runnable { GatesCollector.saveGates(gatesFile) }, 1200L, 1200L)
         logger.info { "Enabled" }
     }
 
     override fun onDisable() {
-        // Při vypínání synchronně, jinak by JVM mohla skončit uprostřed zápisu.
-        GatesCollector.saveGates(gatesFile, async = false)
+        // Synchronous: the server may stop right after onDisable returns.
+        GatesCollector.saveGates(gatesFile, false)
+        TeleportUtil.clear()
         logger.info { "Disabled" }
     }
 }

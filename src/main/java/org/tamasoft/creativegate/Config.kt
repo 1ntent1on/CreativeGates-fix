@@ -17,20 +17,24 @@ class Config {
     val materialMode = Material.BLAZE_ROD
     val voidMaterials: Set<Material> = EnumSet.of(Material.AIR)
 
-    // Příkazy z konzole po úspěšném vytvoření brány.
-    // Placeholdery: {player}, {uuid}, {network}, {gate}, {gates} (počet bran hráče po vytvoření)
+    // Console commands run when a gate is created. Placeholders: {player} {uuid} {network} {gate} {gates}
     val createCommands: List<String> = emptyList()
 
-    // Příkazy z konzole po úspěšném průchodu branou.
-    // Placeholdery: {player}, {uuid}, {network}, {gate}, {creator}, {creator_uuid}
+    // Console commands run after a player successfully travels through a gate.
+    // Placeholders: {player} {uuid} {network} {gate} {creator} {creator_uuid}
     val travelCommands: List<String> = emptyList()
 
-    // false = průchod vlastní branou (nebo branou bez známého tvůrce) příkazy nespouští
-    val travelCommandsOwnGates = false
+    // Run travelCommands also when the traveller is the creator of the gate they enter.
+    val travelCommandsOwnGates: Boolean = false
+
+    // When true, only the creator of the oldest gate in a network (or players with
+    // creativegates.network.bypass) can add further gates to that network.
+    val networkOwnership: Boolean = false
 
 
     // Translations
     val maxGatesMessage : String = "You have reached the maximum number of gates you can create <h><limit><g>."
+    val networkTakenMessage: String = "<b>This network belongs to another player. Use a different network name."
     val noGateMessage: String = "You use the <reqmaterial> on the <blockmaterial> but there seem to be no gate."
     val gateRestrictedCreatorMessage: String = "<i>... the gate is restricted but you are the creator ..."
     val gateRestrictedMessage: String = "<b>... the gate is restricted and you are not the creator."
